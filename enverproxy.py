@@ -14,7 +14,7 @@ import signal
 import sys
 import syslog
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from slog import slog
 
 argparser = argparse.ArgumentParser("Enverproxy");
@@ -49,8 +49,6 @@ class Forward:
 
 
 class TheServer:
-    input_list = []
-    channel = {}
 
     def __init__(self, host, port, forward_to, delay = 0.0001, buffer_size = 4096, log = None):
         if log == None:
@@ -62,13 +60,18 @@ class TheServer:
         self.__forward_to  = forward_to
         self.__port        = port
         self.__host        = host
+        # FIX: instance variables instead of class variables to avoid shared state
+        self.input_list    = []
+        self.channel       = {}
+        self._discovered   = set()
         self.server        = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((host, port))
         self.server.listen(200)
 
     def connect_mqtt(self, host, user, password, port):
-        self.mqtt = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1, client_id='enverproxy')
+        # FIX: use CallbackAPIVersion.VERSION2 to avoid DeprecationWarning
+        self.mqtt = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id='enverproxy')
         if (user != None or password != None):
             self.mqtt.username_pw_set(user, password)
         self.mqtt.connect(host, port)
@@ -81,7 +84,8 @@ class TheServer:
         while True:
             self.__log.logMsg('Entering main loop', 5)
             ss = select.select
-            inputready, outputready, exceptready = ss(self.input_list, [], [])
+            # FIX: add 1.0s timeout so MQTT keepalives/reconnects can be processed
+            inputready, outputready, exceptready = ss(self.input_list, [], [], 1.0)
             self.__log.logMsg('Inputready: ' + str(inputready), 3)
             for self.s in inputready:
                 if self.s == self.server:
@@ -128,7 +132,7 @@ class TheServer:
         self.__log.logMsg('Connection list: ' + str(self.input_list), 5)
         self.__log.logMsg('Channel dictionary: ' + str(self.channel), 5)
         if in_s == self.input_list[0]:
-            # First connection  cannot be closed: proxy listening on its port
+            # First connection cannot be closed: proxy listening on its port
             self.__log.logMsg('No connection left to close', 4)
         else:
             try:
@@ -198,8 +202,6 @@ class TheServer:
             return result
 
     def submit_data(self, wrdata):
-        # Can be https as well. Also: if you use another port then 80 or 443 do not forget to add the port number.
-        # user and password.
         for wrdict in wrdata:
             id = wrdict.pop('wrid')
             wrdict.pop('remaining', None)
@@ -210,39 +212,38 @@ class TheServer:
             # Publish actual state data
             self.mqtt.publish(base_topic, json.dumps(wrdict))
 
-            # Home Assistant Discovery topics
-            for key, details in {
-                "power": {"name": "Power", "unit": "W", "device_class": "power"},
-                "dc": {"name": "Voltage DC", "unit": "V", "device_class": "voltage"},
-                "ac": {"name": "Voltage AC","unit": "V", "device_class": "voltage"},
-                "totalkwh": {"name": "Total Energy", "unit": "kWh", "device_class": "energy", "state_class": "total_increasing"},
-                "temp": {"name": "Temperature", "unit": "°C", "device_class": "temperature"},
-                "freq": {"name": "Frequency", "unit": "Hz", "device_class": "frequency"},
-            }.items():
-                discovery_topic = f"homeassistant/sensor/enverbridge_{id}_{key}/config"
-                payload = {
-                    "name": details["name"],
-                    "state_topic": base_topic,
-                    "value_template": f"{{{{ value_json.{key} }}}}",
-                    "unit_of_measurement": details["unit"],
-                    "device_class": details["device_class"],
-                    "unique_id": f"enverbridge_{id}_{key}",
-                    "device": {
-                        "identifiers": [f"enverbridge_{id}"],
-                        "name": f"EnverBridge {id}",
-                        "manufacturer": "Envertech",
-                        "model": "EVB202"
+            # FIX: only send HA Discovery once per converter ID per session
+            if id not in self._discovered:
+                self.__log.logMsg(f"Publishing Home Assistant discovery topics for converter: {id}", 3)
+                for key, details in {
+                    "power":    {"name": "Power",        "unit": "W",   "device_class": "power"},
+                    "dc":       {"name": "Voltage DC",   "unit": "V",   "device_class": "voltage"},
+                    "ac":       {"name": "Voltage AC",   "unit": "V",   "device_class": "voltage"},
+                    "totalkwh": {"name": "Total Energy", "unit": "kWh", "device_class": "energy", "state_class": "total_increasing"},
+                    "temp":     {"name": "Temperature",  "unit": "°C",  "device_class": "temperature"},
+                    "freq":     {"name": "Frequency",    "unit": "Hz",  "device_class": "frequency"},
+                }.items():
+                    discovery_topic = f"homeassistant/sensor/enverbridge_{id}_{key}/config"
+                    payload = {
+                        "name": details["name"],
+                        "state_topic": base_topic,
+                        "value_template": f"{{{{ value_json.{key} }}}}",
+                        "unit_of_measurement": details["unit"],
+                        "device_class": details["device_class"],
+                        "unique_id": f"enverbridge_{id}_{key}",
+                        "device": {
+                            "identifiers": [f"enverbridge_{id}"],
+                            "name": f"EnverBridge {id}",
+                            "manufacturer": "Envertech",
+                            "model": "EVB202"
+                        }
                     }
-                }
-                # Add 'state_class' only if it exists in the details dictionary
-                if 'state_class' in details:
-                    payload["state_class"] = details["state_class"]
-                
-                self.mqtt.publish(discovery_topic, json.dumps(payload), retain=True)
+                    if 'state_class' in details:
+                        payload["state_class"] = details["state_class"]
+                    self.mqtt.publish(discovery_topic, json.dumps(payload), retain=True)
+                self._discovered.add(id)
 
         self.__log.logMsg("Finished sending to MQTT", 2)
-
-
 
     def process_data(self, data):
         datainhex = data.hex()
@@ -288,7 +289,8 @@ class TheServer:
                 self.__log.logMsg('Replying to handshake with data ' + str(reply.hex()), 4)
                 self.s.send(reply)
                 self.__log.logMsg('Reply sent to: ' + str(self.s), 3)
-                data = json.dumps({"ip":self.s.getpeername()[0], "last_seen":datetime.utcnow().isoformat()})
+                # FIX: use timezone-aware UTC datetime instead of deprecated utcnow()
+                data = json.dumps({"ip": self.s.getpeername()[0], "last_seen": datetime.now(timezone.utc).isoformat()})
                 self.mqtt.publish('enverbridge/bridge', data)
             elif data[:6].hex() in ['6803d6681004', '680056681004']:
                 # payload from converter
@@ -348,7 +350,14 @@ if __name__ == '__main__':
     buffer_size = int(config['enverproxy']['buffer_size'])
     port        = int(config['enverproxy']['listen_port'])
     server      = TheServer(host = '', port = port, forward_to = forward_to, delay = delay, buffer_size = buffer_size, log = log)
-    server.connect_mqtt(config['enverproxy']['mqtthost'], config['enverproxy']['mqttuser'], config['enverproxy']['mqttpassword'], int(config['enverproxy']['mqttport']))
+    # FIX: don't crash the container if MQTT is not reachable at startup
+    try:
+        server.connect_mqtt(config['enverproxy']['mqtthost'], config['enverproxy']['mqttuser'], config['enverproxy']['mqttpassword'], int(config['enverproxy']['mqttport']))
+    except Exception as e:
+        log.logMsg('WARNING: Could not connect to MQTT broker: ' + str(e), 2)
+        log.logMsg('Server will start without MQTT. Fix the config and restart to enable MQTT.', 2)
+        # Create a disconnected client so the rest of the code does not break
+        server.mqtt = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id='enverproxy')
     # Catch SIGTERM signals    
     signal.signal(signal.SIGTERM, Signal_handler(server, log).sigterm_handler)
     # Start proxy server

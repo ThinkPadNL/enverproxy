@@ -25,7 +25,7 @@ config = configparser.ConfigParser()
 config['internal']={}
 config['internal']['conf_file'] = args.config
 config['internal']['section']   = 'enverproxy'
-config['internal']['version']   = '1.3'
+config['internal']['version']   = '1.4'
 config['internal']['keys']      = "['buffer_size', 'delay', 'listen_port', 'verbosity', 'log_type', 'log_address', 'log_port', 'forward_IP', 'forward_port', 'mqttuser', 'mqttpassword', 'mqtthost', 'mqttport']"
 
 

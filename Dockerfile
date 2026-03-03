@@ -5,7 +5,6 @@ RUN apk --no-cache add git && pip3 install paho-mqtt
 RUN git clone https://github.com/ThinkPadNL/enverproxy.git /data/app
 
 WORKDIR /data/app
-VOLUME /data/app
 
 EXPOSE 1898
 

@@ -289,9 +289,10 @@ class TheServer:
                 self.__log.logMsg('Replying to handshake with data ' + str(reply.hex()), 4)
                 self.s.send(reply)
                 self.__log.logMsg('Reply sent to: ' + str(self.s), 3)
+                # FIX: use separate variable for MQTT message so original 'data' (bytes) stays intact
                 # FIX: use timezone-aware UTC datetime instead of deprecated utcnow()
-                data = json.dumps({"ip": self.s.getpeername()[0], "last_seen": datetime.now(timezone.utc).isoformat()})
-                self.mqtt.publish('enverbridge/bridge', data)
+                bridge_msg = json.dumps({"ip": self.s.getpeername()[0], "last_seen": datetime.now(timezone.utc).isoformat()})
+                self.mqtt.publish('enverbridge/bridge', bridge_msg)
             elif data[:6].hex() in ['6803d6681004', '680056681004']:
                 # payload from converter
                 self.process_data(data)
